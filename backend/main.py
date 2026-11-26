@@ -1918,7 +1918,7 @@ async def live_ws(ws: WebSocket):
     """
     # Verify origin
     origin = (ws.headers.get("origin") or "").rstrip("/")
-    if origin not in APP_ORIGINS:
+    if not _is_allowed_origin(origin):
         await ws.close(code=1008)
         return
 

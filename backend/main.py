@@ -46,6 +46,7 @@ from google.oauth2 import id_token as google_id_token
 import numpy as np
 import psycopg
 from psycopg.rows import dict_row
+import requests
 from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
 
@@ -91,11 +92,31 @@ from starlette.concurrency import run_in_threadpool
 # 1. CONFIGURATION
 # ===========================================================================
 
-APP_ORIGIN      = os.getenv("APP_ORIGIN", "http://localhost:5173")
-APP_ORIGINS     = [o.strip().rstrip("/") for o in APP_ORIGIN.split(",") if o.strip()]
+DEFAULT_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://47000bc.hexacoresoftwaresolutions.in",
+]
+APP_ORIGIN      = os.getenv("APP_ORIGIN", "")
+APP_ORIGINS     = list(dict.fromkeys(
+    [o.strip().rstrip("/") for o in APP_ORIGIN.split(",") if o.strip()] + DEFAULT_ORIGINS
+))
+_VERCEL_ORIGIN_RE = re.compile(r"^https://[a-zA-Z0-9-]+\.vercel\.app$")
 COOKIE_SECURE   = os.getenv("COOKIE_SECURE", "false").lower() == "true"
-COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "none" if COOKIE_SECURE else "lax").lower()
+COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "").strip().lower()
 SESSION_MAX_AGE = int(os.getenv("SESSION_MAX_AGE", "28800"))   # 8 hours
+
+
+def _is_allowed_origin(origin: str) -> bool:
+    clean = origin.strip().rstrip("/")
+    return bool(clean and (clean in APP_ORIGINS or _VERCEL_ORIGIN_RE.match(clean)))
+
+
+def _cookie_attrs(request: Request) -> dict:
+    is_https = COOKIE_SECURE or request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
+    samesite = COOKIE_SAMESITE or ("none" if is_https else "lax")
+    secure = True if samesite == "none" else is_https
+    return {"httponly": True, "secure": secure, "samesite": samesite}
 TZ              = os.getenv("ATTENDANCE_TIMEZONE", "Asia/Kolkata")
 OFFICE_START    = os.getenv("OFFICE_START_TIME", "09:30")
 CHANNEL         = "cctv:attendance"
@@ -275,6 +296,13 @@ _fb_lock = threading.Lock()
 _google_request = google_requests.Request()
 
 
+def _firebase_env(name: str) -> str:
+    return (
+        os.getenv(f"FIREBASE_{name}", "").strip()
+        or os.getenv(f"VITE_FIREBASE_{name}", "").strip()
+    )
+
+
 def _verify_firebase_id_token(token: str) -> tuple[dict, bool]:
     """Verify a Firebase ID token using Admin SDK creds or projectId-only public certs."""
     has_creds = _has_firebase_credentials()
@@ -284,7 +312,7 @@ def _verify_firebase_id_token(token: str) -> tuple[dict, bool]:
         )
         return claims, True
 
-    project_id = os.getenv("FIREBASE_PROJECT_ID") or os.getenv("VITE_FIREBASE_PROJECT_ID", "")
+    project_id = _firebase_env("PROJECT_ID")
     if not project_id:
         raise RuntimeError("FIREBASE_PROJECT_ID not configured")
 
@@ -307,7 +335,7 @@ def get_firebase_app():
             return firebase_admin.get_app()
         except ValueError:
             sa_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "")
-            project_id = os.getenv("FIREBASE_PROJECT_ID", "")
+            project_id = _firebase_env("PROJECT_ID")
             if sa_path and Path(sa_path).exists():
                 from firebase_admin import credentials
                 cred = credentials.Certificate(sa_path)
@@ -571,10 +599,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="CCTV Attendance System", version="2.0.0", lifespan=lifespan)
 
-# CORS — allow the React frontend origin(s)
+# CORS — allow the React frontend origin(s) and Vercel preview deployments
 app.add_middleware(
     CORSMiddleware,
     allow_origins=APP_ORIGINS,
+    allow_origin_regex=r"^https://[a-zA-Z0-9-]+\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -589,30 +618,56 @@ class LoginPayload(BaseModel):
     token: str
 
 
-@app.get("/api/health")
-def health():
-    """Health check endpoint for Render / load balancers."""
-    return {"status": "ok"}
+class EmailAuthPayload(BaseModel):
+    email: str
+    password: str
 
 
-@app.get("/api/config")
-def get_firebase_config():
-    """Return public Firebase web config (safe to expose)."""
-    return {
-        "apiKey":           os.getenv("VITE_FIREBASE_API_KEY", ""),
-        "authDomain":       os.getenv("VITE_FIREBASE_AUTH_DOMAIN", ""),
-        "projectId":        os.getenv("VITE_FIREBASE_PROJECT_ID", os.getenv("FIREBASE_PROJECT_ID", "")),
-        "storageBucket":    os.getenv("VITE_FIREBASE_STORAGE_BUCKET", ""),
-        "messagingSenderId":os.getenv("VITE_FIREBASE_MESSAGING_SENDER_ID", ""),
-        "appId":            os.getenv("VITE_FIREBASE_APP_ID", ""),
-    }
+_FIREBASE_ERROR_MESSAGES = {
+    "EMAIL_NOT_FOUND": "Invalid email or password",
+    "INVALID_PASSWORD": "Invalid email or password",
+    "INVALID_LOGIN_CREDENTIALS": "Invalid email or password",
+    "USER_DISABLED": "This account has been disabled",
+    "EMAIL_EXISTS": "An account with this email already exists",
+    "INVALID_EMAIL": "Please enter a valid email address",
+    "WEAK_PASSWORD": "Password must be at least 6 characters",
+    "OPERATION_NOT_ALLOWED": "Email/password sign-in is disabled in Firebase",
+    "TOO_MANY_ATTEMPTS_TRY_LATER": "Too many attempts — please try again later",
+}
 
 
-@app.post("/api/session")
-def login(body: LoginPayload, response: Response):
-    """Exchange a Firebase ID token for a server-side session cookie."""
+def _firebase_identity_auth(operation: str, email: str, password: str) -> str:
+    """Authenticate or register via Firebase Identity Toolkit using backend FIREBASE_API_KEY."""
+    api_key = _firebase_env("API_KEY")
+    if not api_key:
+        raise HTTPException(503, "FIREBASE_API_KEY is not configured on backend")
+
     try:
-        claims, has_creds = _verify_firebase_id_token(body.token)
+        resp = requests.post(
+            f"https://identitytoolkit.googleapis.com/v1/accounts:{operation}?key={api_key}",
+            json={"email": email.strip(), "password": password, "returnSecureToken": True},
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(502, f"Unable to reach Firebase Auth: {exc}")
+
+    data = resp.json()
+    if resp.status_code != 200:
+        code = (data.get("error", {}).get("message") or "").split(":")[0].strip()
+        friendly = _FIREBASE_ERROR_MESSAGES.get(code, code or "Firebase authentication failed")
+        status = 429 if code == "TOO_MANY_ATTEMPTS_TRY_LATER" else 401 if operation == "signInWithPassword" else 400
+        raise HTTPException(status, friendly)
+
+    id_token = data.get("idToken")
+    if not id_token:
+        raise HTTPException(502, "Firebase Auth did not return an ID token")
+    return id_token
+
+
+def _issue_session_from_token(token: str, request: Request, response: Response) -> dict:
+    """Verify Firebase ID token, check admin access, and set the session cookie."""
+    try:
+        claims, has_creds = _verify_firebase_id_token(token)
     except Exception as exc:
         print(f"[AUTH] verify_id_token failed: {type(exc).__name__}: {exc}")
         raise HTTPException(401, "Firebase sign-in failed — invalid token")
@@ -625,7 +680,7 @@ def login(body: LoginPayload, response: Response):
 
     if has_creds:
         session_cookie = firebase_auth.create_session_cookie(
-            body.token,
+            token,
             expires_in=timedelta(seconds=SESSION_MAX_AGE),
             app=get_firebase_app(),
         )
@@ -636,13 +691,10 @@ def login(body: LoginPayload, response: Response):
     response.set_cookie(
         "session",
         session_cookie,
-        httponly=True,
-        secure=COOKIE_SECURE,
-        samesite=COOKIE_SAMESITE,
         max_age=SESSION_MAX_AGE,
+        **_cookie_attrs(request),
     )
 
-    # Log the activity
     try:
         with get_db() as conn:
             conn.execute(
@@ -652,17 +704,57 @@ def login(body: LoginPayload, response: Response):
     except Exception:
         pass
 
-    return {"ok": True}
+    return {"ok": True, "uid": claims["uid"], "email": claims.get("email", "")}
+
+
+@app.get("/api/health")
+def health():
+    """Health check endpoint for Render / load balancers."""
+    return {"status": "ok"}
+
+
+@app.get("/api/config")
+def get_firebase_config():
+    """Return public Firebase web config (safe to expose)."""
+    return {
+        "apiKey":            _firebase_env("API_KEY"),
+        "authDomain":        _firebase_env("AUTH_DOMAIN"),
+        "projectId":         _firebase_env("PROJECT_ID"),
+        "storageBucket":     _firebase_env("STORAGE_BUCKET"),
+        "messagingSenderId": _firebase_env("MESSAGING_SENDER_ID"),
+        "appId":             _firebase_env("APP_ID"),
+    }
+
+
+@app.post("/api/auth/login")
+def auth_login(body: EmailAuthPayload, request: Request, response: Response):
+    """Sign in with email & password using backend FIREBASE_API_KEY."""
+    id_token = _firebase_identity_auth("signInWithPassword", body.email, body.password)
+    return _issue_session_from_token(id_token, request, response)
+
+
+@app.post("/api/auth/register")
+def auth_register(body: EmailAuthPayload, request: Request, response: Response):
+    """Register with email & password using backend FIREBASE_API_KEY."""
+    id_token = _firebase_identity_auth("signUp", body.email, body.password)
+    return _issue_session_from_token(id_token, request, response)
+
+
+@app.post("/api/session")
+def login(body: LoginPayload, request: Request, response: Response):
+    """Exchange a Firebase ID token for a server-side session cookie."""
+    return _issue_session_from_token(body.token, request, response)
 
 
 @app.delete("/api/session")
-def logout(response: Response, user: dict = Depends(admin_user)):
+def logout(request: Request, response: Response, user: dict = Depends(admin_user)):
     """Revoke the Firebase session cookie."""
     try:
         firebase_auth.revoke_refresh_tokens(user["uid"], app=get_firebase_app())
     except Exception:
         pass
-    response.delete_cookie("session", path="/", secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE)
+    attrs = _cookie_attrs(request)
+    response.delete_cookie("session", path="/", secure=attrs["secure"], samesite=attrs["samesite"])
     return {"ok": True}
 
 

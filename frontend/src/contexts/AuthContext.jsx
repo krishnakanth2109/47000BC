@@ -1,22 +1,7 @@
 import { createContext, useContext, useEffect, useState, useCallback } from "react";
-import { initializeApp, getApps } from "firebase/app";
-import {
-  getAuth,
-  inMemoryPersistence,
-  setPersistence,
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-  signOut,
-} from "firebase/auth";
-import firebaseConfig from "../firebase.js";
 import { apiGet, apiPost, apiDelete } from "../api.js";
 
 const AuthContext = createContext(null);
-
-function getFirebaseAuth() {
-  const app = getApps()[0] || initializeApp(firebaseConfig);
-  return getAuth(app);
-}
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(undefined); // undefined = still loading
@@ -30,34 +15,19 @@ export function AuthProvider({ children }) {
       .finally(() => setLoading(false));
   }, []);
 
-  const _establishSession = useCallback(async (auth, credential) => {
-    const idToken = await credential.user.getIdToken();
-
-    // Exchange Firebase ID token for a server-side session cookie
-    try {
-      await apiPost("session", { token: idToken });
-    } finally {
-      await signOut(auth); // Don't keep Firebase client-side state
-    }
-
+  const login = useCallback(async (email, password) => {
+    await apiPost("auth/login", { email, password });
     const me = await apiGet("me");
     setUser(me);
     return me;
   }, []);
 
-  const login = useCallback(async (email, password) => {
-    const auth = getFirebaseAuth();
-    await setPersistence(auth, inMemoryPersistence);
-    const credential = await signInWithEmailAndPassword(auth, email, password);
-    return _establishSession(auth, credential);
-  }, [_establishSession]);
-
   const register = useCallback(async (email, password) => {
-    const auth = getFirebaseAuth();
-    await setPersistence(auth, inMemoryPersistence);
-    const credential = await createUserWithEmailAndPassword(auth, email, password);
-    return _establishSession(auth, credential);
-  }, [_establishSession]);
+    await apiPost("auth/register", { email, password });
+    const me = await apiGet("me");
+    setUser(me);
+    return me;
+  }, []);
 
   const logout = useCallback(async () => {
     await apiDelete("session");

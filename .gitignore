@@ -19,6 +19,7 @@ service-account*.json
 # Local data
 database/
 employees/training_photos/
+uploads/
 reports/
 *.db
 

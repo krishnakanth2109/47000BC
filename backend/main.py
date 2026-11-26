@@ -12,6 +12,7 @@ Stack:
 """
 
 import os
+import re
 import io
 import csv
 import hmac
@@ -79,7 +80,7 @@ from fastapi import (
     Query, Path as PathParam,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -91,6 +92,7 @@ from starlette.concurrency import run_in_threadpool
 # ===========================================================================
 
 APP_ORIGIN      = os.getenv("APP_ORIGIN", "http://localhost:5173")
+APP_ORIGINS     = [o.strip().rstrip("/") for o in APP_ORIGIN.split(",") if o.strip()]
 COOKIE_SECURE   = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 SESSION_MAX_AGE = int(os.getenv("SESSION_MAX_AGE", "28800"))   # 8 hours
 TZ              = os.getenv("ATTENDANCE_TIMEZONE", "Asia/Kolkata")
@@ -98,6 +100,35 @@ OFFICE_START    = os.getenv("OFFICE_START_TIME", "09:30")
 CHANNEL         = "cctv:attendance"
 FACE_THRESHOLD  = float(os.getenv("FACE_THRESHOLD", "65"))
 CASCADE_PATH    = str(Path(__file__).resolve().parents[1] / "haarcascade_frontalface_default.xml")
+UPLOAD_DIR      = Path(__file__).resolve().parents[1] / "uploads"
+
+def _safe_filename_stem(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "_", value).strip("._") or "file"
+
+
+def _upload_image(raw: bytes, cloud_folder: str, local_subdir: str, filename_stem: str) -> tuple[str, str]:
+    """Upload image to Cloudinary when active, falling back to local uploads/ storage."""
+    if (
+        os.getenv("CLOUDINARY_CLOUD_NAME")
+        and os.getenv("CLOUDINARY_API_KEY")
+        and os.getenv("CLOUDINARY_API_SECRET")
+    ):
+        try:
+            res = cloudinary.uploader.upload(
+                raw,
+                folder=cloud_folder,
+                type="authenticated",
+                resource_type="image",
+            )
+            return res.get("secure_url", ""), res.get("public_id", "")
+        except Exception as exc:
+            print(f"[UPLOAD] Cloudinary unavailable ({exc}); saving locally.")
+
+    target_dir = UPLOAD_DIR / local_subdir
+    target_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = f"{_safe_filename_stem(filename_stem)}.jpg"
+    (target_dir / safe_name).write_bytes(raw)
+    return "", f"local:{local_subdir}/{safe_name}"
 
 # Cloudinary: SDK auto-reads CLOUDINARY_URL env var (no manual config needed)
 # If using individual vars, they were already set by _parse_cloudinary_url() above.
@@ -136,7 +167,7 @@ async def get_async_redis() -> AsyncRedis:
     url = os.environ.get("REDIS_URL", "")
     if not url:
         raise HTTPException(503, "REDIS_URL not configured")
-    return AsyncRedis.from_url(url, decode_responses=True)
+    return AsyncRedis.from_url(url, socket_connect_timeout=2, decode_responses=True)
 
 
 def run_migrations():
@@ -414,23 +445,23 @@ def _record_attendance(employee_id: str, crop: np.ndarray, direction: str):
             if not row:
                 return  # already recorded today
 
-            # Upload capture to Cloudinary
+            # Upload capture to Cloudinary (or fall back to local uploads/captures/)
             _, buf = cv2.imencode(".jpg", crop)
-            upload_result = cloudinary.uploader.upload(
+            image_url, public_id = _upload_image(
                 buf.tobytes(),
-                folder="cctv-attendance",
-                type="authenticated",
-                resource_type="image",
+                "cctv-attendance",
+                "captures",
+                f"event_{row['id']}",
             )
+            if not image_url:
+                image_url = f"/api/events/{row['id']}/snapshot"
             conn.execute(
                 "UPDATE cctv_event SET image_url=%s, public_id=%s WHERE id=%s",
-                (upload_result["secure_url"], upload_result["public_id"], row["id"]),
+                (image_url, public_id, row["id"]),
             )
 
-        # Notify all WebSocket clients
-        r = get_redis()
-        r.publish(CHANNEL, "refresh")
-        r.close()
+        # Notify all WebSocket clients (non-blocking)
+        _publish_attendance_refresh()
 
     except Exception as exc:
         print(f"[RECORD ERROR] {exc}")
@@ -539,10 +570,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="CCTV Attendance System", version="2.0.0", lifespan=lifespan)
 
-# CORS — allow the React Vite dev server
+# CORS — allow the React frontend origin(s)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[APP_ORIGIN],
+    allow_origins=APP_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -673,6 +704,27 @@ def get_employee(
     return row
 
 
+@app.get("/api/employees/{employee_id}/photo")
+def get_employee_photo(
+    employee_id: str = PathParam(...),
+    _: dict = Depends(admin_user),
+):
+    """Serve locally stored employee profile photo (or first face sample fallback)."""
+    emp_dir = (UPLOAD_DIR / "employees").resolve()
+    local_file = (emp_dir / f"{_safe_filename_stem(employee_id)}.jpg").resolve()
+    if local_file.parent == emp_dir and local_file.is_file():
+        return FileResponse(local_file, media_type="image/jpeg")
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT samples FROM cctv_employee WHERE id = %s",
+            (employee_id,),
+        ).fetchone()
+    if row and row["samples"]:
+        return Response(content=bytes(row["samples"][0]), media_type="image/png")
+    raise HTTPException(404, "Employee photo not found")
+
+
 @app.post("/api/employees", status_code=201)
 def enroll_employee(
     id: str = Form(..., min_length=1, max_length=80),
@@ -691,7 +743,7 @@ def enroll_employee(
 
     cascade = load_cascade()
     samples: list[bytes] = []
-    photo_url = ""
+    first_raw: Optional[bytes] = None
 
     for i, photo in enumerate(photos):
         raw = photo.file.read(5_000_001)
@@ -705,19 +757,17 @@ def enroll_employee(
         if len(crops) != 1:
             raise HTTPException(422, f"Photo {i + 1} must show exactly one clear face")
 
+        if i == 0:
+            first_raw = raw
+
         # Encode face crop as PNG bytes for storage in Neon
         _, buf = cv2.imencode(".png", crops[0])
         samples.append(buf.tobytes())
 
-        # Upload the first photo to Cloudinary as the profile picture
-        if i == 0:
-            upload = cloudinary.uploader.upload(
-                raw,
-                folder="cctv-employees",
-                type="authenticated",
-                resource_type="image",
-            )
-            photo_url = upload.get("secure_url", "")
+    # Upload first photo to Cloudinary or fall back to local storage
+    photo_url, _ = _upload_image(first_raw or b"", "cctv-employees", "employees", id)
+    if not photo_url:
+        photo_url = f"/api/employees/{id}/photo"
 
     # Parse joining_date
     jd = None
@@ -802,8 +852,7 @@ def camera_control(
 ):
     global _camera_worker, _camera_status
 
-    required_env = ["DATABASE_URL", "REDIS_URL", "CLOUDINARY_CLOUD_NAME",
-                    "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET", "TAPO_RTSP_URL"]
+    required_env = ["DATABASE_URL", "TAPO_RTSP_URL"]
 
     with _camera_lock:
         if action == "stop":
@@ -1173,7 +1222,7 @@ def snapshot(
     event_id: int = PathParam(...),
     _: dict = Depends(admin_user),
 ):
-    """Redirect to a short-lived signed Cloudinary URL for the capture image."""
+    """Serve local capture file or redirect to a signed Cloudinary URL."""
     with get_db() as conn:
         row = conn.execute(
             "SELECT public_id FROM cctv_event WHERE id = %s", (event_id,)
@@ -1181,8 +1230,25 @@ def snapshot(
     if not row or not row["public_id"]:
         raise HTTPException(404, "Snapshot not found")
 
+    public_id = row["public_id"]
+    if public_id.startswith("local:"):
+        rel = public_id[len("local:"):]
+        upload_root = UPLOAD_DIR.resolve()
+        local_file = (upload_root / rel).resolve()
+        try:
+            local_file.relative_to(upload_root)
+        except ValueError:
+            raise HTTPException(403, "Invalid snapshot path")
+        if not local_file.is_file():
+            raise HTTPException(404, "Snapshot file not found")
+        return FileResponse(
+            local_file,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+
     url = private_download_url(
-        row["public_id"],
+        public_id,
         "jpg",
         type="authenticated",
         expires_at=int(time.time()) + 60,
@@ -1752,7 +1818,8 @@ async def live_ws(ws: WebSocket):
     is recorded (via Redis pub/sub) and 'ping' as a keepalive.
     """
     # Verify origin
-    if ws.headers.get("origin") != APP_ORIGIN:
+    origin = (ws.headers.get("origin") or "").rstrip("/")
+    if origin not in APP_ORIGINS:
         await ws.close(code=1008)
         return
 
@@ -1767,8 +1834,9 @@ async def live_ws(ws: WebSocket):
 
     await ws.accept()
 
-    redis = await get_async_redis()
+    redis = None
     try:
+        redis = await get_async_redis()
         async with redis.pubsub() as sub:
             await sub.subscribe(CHANNEL)
             while time.time() < claims["exp"]:
@@ -1782,9 +1850,23 @@ async def live_ws(ws: WebSocket):
                 except Exception:
                     break
     except Exception:
-        pass
+        # Redis offline — keep WebSocket alive with periodic keepalive pings
+        while time.time() < claims["exp"]:
+            try:
+                await asyncio.wait_for(ws.receive_text(), timeout=15)
+            except asyncio.TimeoutError:
+                try:
+                    await ws.send_text("ping")
+                except Exception:
+                    break
+            except Exception:
+                break
     finally:
-        await redis.aclose()
+        if redis is not None:
+            try:
+                await redis.aclose()
+            except Exception:
+                pass
 
 
 # ===========================================================================

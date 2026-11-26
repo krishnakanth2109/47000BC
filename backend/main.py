@@ -1882,4 +1882,15 @@ async def live_ws(ws: WebSocket):
 
 frontend_dist = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 if frontend_dist.is_dir():
-    app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
+    assets_dir = frontend_dist / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    @app.get("/{full_path:path}")
+    def serve_spa(full_path: str):
+        if full_path.startswith("api/"):
+            raise HTTPException(404, "Not found")
+        target = (frontend_dist / full_path).resolve()
+        if full_path and target.is_file() and frontend_dist.resolve() in target.parents:
+            return FileResponse(target)
+        return FileResponse(frontend_dist / "index.html")

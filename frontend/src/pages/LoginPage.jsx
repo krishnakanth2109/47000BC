@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useAuth } from "../contexts/AuthContext.jsx";
-import styles from "./LoginPage.module.css";
 
 export default function LoginPage() {
   const { login, register } = useAuth();
@@ -43,30 +42,36 @@ export default function LoginPage() {
   }
 
   return (
-    <div className={styles.container}>
-      <div className={styles.card}>
-        <div className={styles.logo}>
-          <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-900 via-blue-950 to-blue-600 p-4">
+      <div className="w-full max-w-md rounded-2xl bg-white p-8 text-center shadow-2xl">
+        <div className="mb-4 flex justify-center">
+          <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-14 w-14">
             <rect width="48" height="48" rx="12" fill="#2563eb" />
             <path d="M12 18a6 6 0 1 1 12 0 6 6 0 0 1-12 0z" fill="white" />
             <path d="M34 16l8-4v16l-8-4V16z" fill="white" />
             <path d="M10 34c0-4.4 3.6-8 8-8h12c4.4 0 8 3.6 8 8" stroke="white" strokeWidth="2" strokeLinecap="round" />
           </svg>
         </div>
-        <h1 className={styles.title}>CCTV Attendance</h1>
-        <p className={styles.subtitle}>
+
+        <h1 className="text-2xl font-bold text-slate-900">CCTV Attendance</h1>
+        <p className="mt-1 mb-6 text-sm text-slate-500">
           {isRegister ? "Create administrator account" : "Administrator sign in"}
         </p>
 
         {error && (
-          <div className={styles.error} role="alert">
+          <div
+            className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-left text-sm text-red-700"
+            role="alert"
+          >
             {error}
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className={styles.form}>
-          <div className={styles.field}>
-            <label htmlFor="email">Email address</label>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4 text-left">
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="email" className="text-sm font-semibold text-slate-700">
+              Email address
+            </label>
             <input
               id="email"
               type="email"
@@ -76,11 +81,14 @@ export default function LoginPage() {
               onChange={(e) => setEmail(e.target.value)}
               placeholder="admin@company.com"
               disabled={busy}
+              className="rounded-lg border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 outline-none transition focus:border-blue-600 focus:ring-4 focus:ring-blue-600/15 disabled:cursor-not-allowed disabled:bg-slate-50"
             />
           </div>
 
-          <div className={styles.field}>
-            <label htmlFor="password">Password</label>
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="password" className="text-sm font-semibold text-slate-700">
+              Password
+            </label>
             <input
               id="password"
               type="password"
@@ -91,12 +99,15 @@ export default function LoginPage() {
               onChange={(e) => setPassword(e.target.value)}
               placeholder="••••••••"
               disabled={busy}
+              className="rounded-lg border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 outline-none transition focus:border-blue-600 focus:ring-4 focus:ring-blue-600/15 disabled:cursor-not-allowed disabled:bg-slate-50"
             />
           </div>
 
           {isRegister && (
-            <div className={styles.field}>
-              <label htmlFor="confirmPassword">Confirm password</label>
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="confirmPassword" className="text-sm font-semibold text-slate-700">
+                Confirm password
+              </label>
               <input
                 id="confirmPassword"
                 type="password"
@@ -107,14 +118,15 @@ export default function LoginPage() {
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 placeholder="••••••••"
                 disabled={busy}
+                className="rounded-lg border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 outline-none transition focus:border-blue-600 focus:ring-4 focus:ring-blue-600/15 disabled:cursor-not-allowed disabled:bg-slate-50"
               />
             </div>
           )}
 
           <button
             type="submit"
-            className={styles.submitBtn}
             disabled={busy}
+            className="mt-2 cursor-pointer rounded-lg bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {busy
               ? isRegister ? "Registering…" : "Signing in…"
@@ -122,13 +134,13 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <div className={styles.switchRow}>
+        <div className="mt-5 text-sm text-slate-500">
           {isRegister ? "Already have an account?" : "First time here?"}{" "}
           <button
             type="button"
-            className={styles.switchBtn}
             onClick={toggleMode}
             disabled={busy}
+            className="cursor-pointer font-semibold text-blue-600 hover:underline disabled:opacity-60"
           >
             {isRegister ? "Sign in" : "Register"}
           </button>

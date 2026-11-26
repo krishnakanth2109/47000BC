@@ -21,11 +21,11 @@ import base64
 import hashlib
 import asyncio
 import threading
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, time as dt_time
 from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 # ---------------------------------------------------------------------------
 # Load .env from project root (parent of backend/)
@@ -39,6 +39,8 @@ from cloudinary.utils import private_download_url
 import cv2
 import firebase_admin
 from firebase_admin import auth as firebase_auth
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token as google_id_token
 import numpy as np
 import psycopg
 from psycopg.rows import dict_row
@@ -91,6 +93,7 @@ APP_ORIGIN      = os.getenv("APP_ORIGIN", "http://localhost:5173")
 COOKIE_SECURE   = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 SESSION_MAX_AGE = int(os.getenv("SESSION_MAX_AGE", "28800"))   # 8 hours
 TZ              = os.getenv("ATTENDANCE_TIMEZONE", "Asia/Kolkata")
+OFFICE_START    = os.getenv("OFFICE_START_TIME", "09:30")
 CHANNEL         = "cctv:attendance"
 FACE_THRESHOLD  = float(os.getenv("FACE_THRESHOLD", "65"))
 CASCADE_PATH    = str(Path(__file__).resolve().parents[1] / "haarcascade_frontalface_default.xml")
@@ -153,6 +156,18 @@ def run_migrations():
                 created_at  TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        for alter_sql in (
+            "ALTER TABLE cctv_employee ADD COLUMN IF NOT EXISTS department TEXT DEFAULT ''",
+            "ALTER TABLE cctv_employee ADD COLUMN IF NOT EXISTS designation TEXT DEFAULT ''",
+            "ALTER TABLE cctv_employee ADD COLUMN IF NOT EXISTS phone TEXT DEFAULT ''",
+            "ALTER TABLE cctv_employee ADD COLUMN IF NOT EXISTS email TEXT DEFAULT ''",
+            "ALTER TABLE cctv_employee ADD COLUMN IF NOT EXISTS joining_date DATE",
+            "ALTER TABLE cctv_employee ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Active'",
+            "ALTER TABLE cctv_employee ADD COLUMN IF NOT EXISTS photo_url TEXT DEFAULT ''",
+            "ALTER TABLE cctv_employee ADD COLUMN IF NOT EXISTS samples BYTEA[] NOT NULL DEFAULT ARRAY[]::BYTEA[]",
+            "ALTER TABLE cctv_employee ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()",
+        ):
+            conn.execute(alter_sql)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS cctv_event (
                 id          BIGSERIAL PRIMARY KEY,
@@ -188,6 +203,27 @@ def run_migrations():
 # ===========================================================================
 
 _fb_lock = threading.Lock()
+_google_request = google_requests.Request()
+
+
+def _verify_firebase_id_token(token: str) -> tuple[dict, bool]:
+    """Verify a Firebase ID token using Admin SDK creds or projectId-only public certs."""
+    has_creds = _has_firebase_credentials()
+    if has_creds:
+        claims = firebase_auth.verify_id_token(
+            token, app=get_firebase_app(), check_revoked=True
+        )
+        return claims, True
+
+    project_id = os.getenv("FIREBASE_PROJECT_ID") or os.getenv("VITE_FIREBASE_PROJECT_ID", "")
+    if not project_id:
+        raise RuntimeError("FIREBASE_PROJECT_ID not configured")
+
+    claims = google_id_token.verify_firebase_token(
+        token, _google_request, audience=project_id
+    )
+    claims["uid"] = claims["sub"]
+    return claims, False
 
 
 def _has_firebase_credentials() -> bool:
@@ -500,11 +536,8 @@ def get_firebase_config():
 @app.post("/api/session")
 def login(body: LoginPayload, response: Response):
     """Exchange a Firebase ID token for a server-side session cookie."""
-    has_creds = _has_firebase_credentials()
     try:
-        claims = firebase_auth.verify_id_token(
-            body.token, app=get_firebase_app(), check_revoked=has_creds
-        )
+        claims, has_creds = _verify_firebase_id_token(body.token)
     except Exception as exc:
         print(f"[AUTH] verify_id_token failed: {type(exc).__name__}: {exc}")
         raise HTTPException(401, "Firebase sign-in failed — invalid token")
@@ -765,6 +798,275 @@ def camera_control(
 # ===========================================================================
 # 10. ATTENDANCE / EVENTS ENDPOINTS
 # ===========================================================================
+
+def _parse_day_param(day_str: str) -> date:
+    if not day_str:
+        return datetime.now(ZoneInfo(TZ)).date()
+    try:
+        return date.fromisoformat(day_str)
+    except ValueError:
+        raise HTTPException(422, "Invalid date format; expected YYYY-MM-DD")
+
+
+def _parse_office_start_time() -> dt_time:
+    try:
+        parts = OFFICE_START.split(":")
+        return dt_time(int(parts[0]), int(parts[1]))
+    except (ValueError, IndexError):
+        return dt_time(9, 30)
+
+
+def _publish_attendance_refresh():
+    url = os.environ.get("REDIS_URL", "")
+    if not url:
+        return
+    def _send():
+        try:
+            r = Redis.from_url(url, socket_connect_timeout=1, socket_timeout=1, decode_responses=True)
+            r.publish(CHANNEL, "refresh")
+            r.close()
+        except Exception:
+            pass
+    threading.Thread(target=_send, daemon=True).start()
+
+
+class ManualAttendancePayload(BaseModel):
+    employee_id: str
+    day: str
+    direction: Literal["in", "out"]
+    time: Optional[str] = None
+
+
+@app.get("/api/attendance/daily")
+def daily_attendance(
+    day: str = Query("", description="YYYY-MM-DD (defaults to today)"),
+    q: str = Query("", description="Search name, ID, or department"),
+    status: str = Query("all", description="all|present|absent|inside|checked_out|late"),
+    _: dict = Depends(admin_user),
+):
+    """Return daily attendance overview KPIs and per-employee status for a given date."""
+    target_day = _parse_day_param(day)
+    tz = ZoneInfo(TZ)
+    cutoff = _parse_office_start_time()
+
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                e.id, e.name, e.department, e.designation, e.status AS employee_status, e.photo_url,
+                ev_in.id AS check_in_event_id,
+                ev_in.occurred_at AS check_in_at,
+                ev_in.image_url AS check_in_image_url,
+                ev_out.id AS check_out_event_id,
+                ev_out.occurred_at AS check_out_at,
+                ev_out.image_url AS check_out_image_url
+            FROM cctv_employee e
+            LEFT JOIN cctv_event ev_in
+              ON ev_in.employee_id = e.id AND ev_in.day = %s AND ev_in.direction = 'in'
+            LEFT JOIN cctv_event ev_out
+              ON ev_out.employee_id = e.id AND ev_out.day = %s AND ev_out.direction = 'out'
+            WHERE e.status = 'Active' OR ev_in.id IS NOT NULL OR ev_out.id IS NOT NULL
+            ORDER BY e.name, e.id
+            """,
+            (target_day, target_day),
+        ).fetchall()
+
+    all_records = []
+    total_active = 0
+    present_active = 0
+    inside_count = 0
+    checked_out_count = 0
+    late_count = 0
+    total_hours_sum = 0.0
+
+    for row in rows:
+        cin = row["check_in_at"].astimezone(tz) if row["check_in_at"] else None
+        cout = row["check_out_at"].astimezone(tz) if row["check_out_at"] else None
+
+        if cin and cout:
+            att_status = "Checked Out"
+            hours = round(max(0.0, (cout - cin).total_seconds() / 3600.0), 2)
+        elif cin:
+            att_status = "Inside"
+            hours = None
+        elif cout:
+            att_status = "Checked Out"
+            hours = None
+        else:
+            att_status = "Absent"
+            hours = None
+
+        is_late = bool(cin and cin.time() > cutoff)
+
+        if row["employee_status"] == "Active":
+            total_active += 1
+            if att_status != "Absent":
+                present_active += 1
+        if att_status == "Inside":
+            inside_count += 1
+        elif att_status == "Checked Out":
+            checked_out_count += 1
+        if is_late:
+            late_count += 1
+        if hours is not None:
+            total_hours_sum += hours
+
+        all_records.append({
+            "employee_id": row["id"],
+            "name": row["name"],
+            "department": row["department"] or "",
+            "designation": row["designation"] or "",
+            "employee_status": row["employee_status"] or "Active",
+            "photo_url": row["photo_url"] or "",
+            "attendance_status": att_status,
+            "is_late": is_late,
+            "check_in_event_id": row["check_in_event_id"],
+            "check_in_at": cin.isoformat() if cin else None,
+            "check_in_source": "CCTV" if row["check_in_image_url"] else ("Manual" if cin else None),
+            "check_in_has_photo": bool(row["check_in_image_url"]),
+            "check_out_event_id": row["check_out_event_id"],
+            "check_out_at": cout.isoformat() if cout else None,
+            "check_out_source": "CCTV" if row["check_out_image_url"] else ("Manual" if cout else None),
+            "check_out_has_photo": bool(row["check_out_image_url"]),
+            "working_hours": hours,
+        })
+
+    q_lower = q.strip().lower()
+    status_norm = status.strip().lower()
+    filtered = []
+    for rec in all_records:
+        if q_lower and not any(
+            q_lower in (rec[field] or "").lower()
+            for field in ("employee_id", "name", "department", "designation")
+        ):
+            continue
+        if status_norm == "present" and rec["attendance_status"] == "Absent":
+            continue
+        if status_norm == "absent" and rec["attendance_status"] != "Absent":
+            continue
+        if status_norm == "inside" and rec["attendance_status"] != "Inside":
+            continue
+        if status_norm == "checked_out" and rec["attendance_status"] != "Checked Out":
+            continue
+        if status_norm == "late" and not rec["is_late"]:
+            continue
+        filtered.append(rec)
+
+    absent_active = max(0, total_active - present_active)
+    rate = round((present_active / total_active) * 100.0, 1) if total_active else 0.0
+
+    return {
+        "overview": {
+            "date": target_day.isoformat(),
+            "timezone": TZ,
+            "office_start": cutoff.strftime("%H:%M"),
+            "total_employees": total_active,
+            "present": present_active,
+            "absent": absent_active,
+            "inside": inside_count,
+            "checked_out": checked_out_count,
+            "late": late_count,
+            "attendance_rate": rate,
+            "total_hours": round(total_hours_sum, 2),
+        },
+        "records": filtered,
+    }
+
+
+@app.post("/api/attendance/manual")
+def upsert_manual_attendance(
+    body: ManualAttendancePayload,
+    user: dict = Depends(admin_user),
+):
+    """Create or update an employee's check-in or check-out event for a given date."""
+    target_day = _parse_day_param(body.day)
+    tz = ZoneInfo(TZ)
+
+    if body.time:
+        parsed_time = None
+        for fmt in ("%H:%M:%S", "%H:%M"):
+            try:
+                parsed_time = datetime.strptime(body.time.strip(), fmt).time()
+                break
+            except ValueError:
+                continue
+        if parsed_time is None:
+            raise HTTPException(422, "time must be HH:MM or HH:MM:SS")
+    else:
+        parsed_time = datetime.now(tz).time().replace(microsecond=0)
+
+    occurred_at = datetime.combine(target_day, parsed_time, tzinfo=tz)
+
+    with get_db() as conn:
+        emp = conn.execute(
+            "SELECT id, name FROM cctv_employee WHERE id = %s",
+            (body.employee_id,),
+        ).fetchone()
+        if not emp:
+            raise HTTPException(404, "Employee not found")
+
+        row = conn.execute(
+            """
+            INSERT INTO cctv_event (employee_id, day, direction, occurred_at, image_url, public_id)
+            VALUES (%s, %s, %s, %s, '', '')
+            ON CONFLICT (employee_id, day, direction)
+            DO UPDATE SET occurred_at = EXCLUDED.occurred_at
+            RETURNING id, occurred_at
+            """,
+            (body.employee_id, target_day, body.direction, occurred_at),
+        ).fetchone()
+
+        conn.execute(
+            "INSERT INTO activity_log (uid, action, description) VALUES (%s, %s, %s)",
+            (
+                user["uid"],
+                "MANUAL_ATTENDANCE",
+                f"Marked {body.direction} for {body.employee_id} on {target_day.isoformat()} at {parsed_time.strftime('%H:%M:%S')}",
+            ),
+        )
+
+    _publish_attendance_refresh()
+    return {"ok": True, "id": row["id"], "occurred_at": row["occurred_at"].astimezone(tz).isoformat()}
+
+
+@app.delete("/api/attendance/manual")
+def delete_manual_attendance(
+    employee_id: str = Query(...),
+    day: str = Query(...),
+    direction: str = Query("", description="Optional: 'in' or 'out'; empty clears both"),
+    user: dict = Depends(admin_user),
+):
+    """Clear an employee's check-in and/or check-out event for a given date."""
+    target_day = _parse_day_param(day)
+    if direction not in ("", "in", "out"):
+        raise HTTPException(422, "direction must be 'in', 'out', or empty")
+
+    with get_db() as conn:
+        if direction:
+            cur = conn.execute(
+                "DELETE FROM cctv_event WHERE employee_id = %s AND day = %s AND direction = %s",
+                (employee_id, target_day, direction),
+            )
+        else:
+            cur = conn.execute(
+                "DELETE FROM cctv_event WHERE employee_id = %s AND day = %s",
+                (employee_id, target_day),
+            )
+        if cur.rowcount == 0:
+            raise HTTPException(404, "No matching attendance record found")
+
+        conn.execute(
+            "INSERT INTO activity_log (uid, action, description) VALUES (%s, %s, %s)",
+            (
+                user["uid"],
+                "DELETE_ATTENDANCE",
+                f"Cleared {direction or 'all'} attendance for {employee_id} on {target_day.isoformat()}",
+            ),
+        )
+
+    _publish_attendance_refresh()
+    return {"ok": True, "deleted": cur.rowcount}
+
 
 @app.get("/api/attendance")
 def list_attendance(

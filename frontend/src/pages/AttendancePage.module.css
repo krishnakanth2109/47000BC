@@ -1,0 +1,27 @@
+.page { padding:1.5rem; max-width:1200px; margin:0 auto; }
+.header { display:flex; justify-content:space-between; align-items:center; margin-bottom:1.5rem; }
+.heading { font-size:1.75rem; font-weight:700; color:#111827; margin:0; }
+.error { background:#fef2f2; border:1px solid #fca5a5; color:#b91c1c; border-radius:.5rem; padding:.75rem 1rem; margin-bottom:1rem; }
+.exportBtn { padding:.6rem 1.2rem; background:#10b981; color:white; border:none; border-radius:.5rem; font-size:.9rem; font-weight:600; cursor:pointer; }
+.exportBtn:hover { background:#059669; }
+.filters { display:flex; flex-wrap:wrap; gap:.75rem; align-items:flex-end; background:white; padding:1rem 1.25rem; border-radius:.75rem; box-shadow:0 1px 4px rgba(0,0,0,.08); margin-bottom:1.5rem; }
+.filterField { display:flex; flex-direction:column; gap:.25rem; }
+.filterField label { font-size:.75rem; font-weight:600; color:#6b7280; text-transform:uppercase; letter-spacing:.05em; }
+.filterField input, .filterField select { padding:.45rem .75rem; border:1px solid #d1d5db; border-radius:.5rem; font-size:.875rem; outline:none; }
+.filterField input:focus, .filterField select:focus { border-color:#2563eb; }
+.filterBtn { padding:.5rem 1.2rem; background:#2563eb; color:white; border:none; border-radius:.5rem; font-size:.875rem; font-weight:600; cursor:pointer; align-self:flex-end; }
+.filterBtn:hover { background:#1d4ed8; }
+.card { background:white; border-radius:.75rem; padding:1.5rem; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+.resultCount { font-size:.875rem; color:#6b7280; margin:0 0 .75rem; }
+.tableWrapper { overflow-x:auto; }
+.table { width:100%; border-collapse:collapse; font-size:.875rem; }
+.table th { background:#f9fafb; padding:.625rem .75rem; text-align:left; color:#6b7280; font-weight:600; font-size:.75rem; text-transform:uppercase; letter-spacing:.05em; border-bottom:1px solid #e5e7eb; }
+.table td { padding:.75rem; border-bottom:1px solid #f3f4f6; color:#374151; vertical-align:middle; }
+.empName { display:block; font-weight:600; color:#111827; }
+.empId { display:block; font-size:.75rem; color:#9ca3af; }
+.badge { display:inline-block; padding:.2rem .6rem; border-radius:999px; font-size:.75rem; font-weight:600; }
+.badgeIn { background:#d1fae5; color:#065f46; }
+.badgeOut { background:#fef3c7; color:#92400e; }
+.viewLink { color:#2563eb; text-decoration:none; font-weight:500; }
+.viewLink:hover { text-decoration:underline; }
+.empty { color:#9ca3af; text-align:center; padding:2rem; }

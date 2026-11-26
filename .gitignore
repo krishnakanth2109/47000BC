@@ -1,12 +1,40 @@
 
+# Python
 .venv/
 venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Secrets — NEVER commit these
 .env
-*.db
-*.log
+*.env.local
+firebase-service-account.json
+service-account*.json
+
+# Local data
 database/
 employees/training_photos/
 reports/
+*.db
+
+# Logs
+*.log
+backend-import.log
+
+# Node / Frontend
+node_modules/
+frontend/dist/
+.vite/
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Models (large files — regenerated from Neon data)
+models/face_model.yml
+models/labels.json

@@ -271,19 +271,18 @@ def train_model():
         np.array(face_labels, dtype=np.int32)
     )
 
-    model.write(MODEL_PATH)
-
-    with open(
-        LABELS_PATH,
-        "w",
-        encoding="utf-8"
-    ) as file:
-
-        json.dump(
-            label_mapping,
-            file,
-            indent=4
-        )
+    labels_tmp = LABELS_PATH + ".tmp"
+    model_tmp = MODEL_PATH + ".tmp.yml"
+    try:
+        with open(labels_tmp, "w", encoding="utf-8") as file:
+            json.dump(label_mapping, file, indent=4)
+        model.write(model_tmp)
+        os.replace(model_tmp, MODEL_PATH)
+        os.replace(labels_tmp, LABELS_PATH)
+    finally:
+        for temporary_path in (model_tmp, labels_tmp):
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
 
     print("\n[TRAINING] Model trained successfully.")
     print("[TRAINING] Employees:", len(label_mapping))

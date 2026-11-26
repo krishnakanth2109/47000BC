@@ -27,7 +27,6 @@ from db import (
 )
 
 from face_recognition import (
-    ensure_tables,
     start_camera_worker,
     stop_camera_worker,
     generate_video_frames,
@@ -56,7 +55,7 @@ app = Flask(__name__)
 
 app.config["SECRET_KEY"] = os.environ.get(
     "FLASK_SECRET_KEY",
-    "change-this-secret-key-before-production"
+    ""
 )
 
 app.config["UPLOAD_FOLDER"] = EMPLOYEE_FOLDER
@@ -65,6 +64,11 @@ app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024
 
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get(
+    "FLASK_COOKIE_SECURE", "0"
+).strip().lower() in ("1", "true", "yes")
+if not app.config["SECRET_KEY"]:
+    app.config["SECRET_KEY"] = os.urandom(32).hex()
 
 
 # ============================================================
@@ -80,7 +84,6 @@ def get_db():
 
 def initialize_app_database():
     initialize_database()
-    ensure_tables()
     print("Database initialized successfully.")
 
 
@@ -157,6 +160,11 @@ def role_required(*allowed_roles):
     return decorator
 
 
+def admin_or_manager_required(function):
+    """Apply the common management role guard to a page/API view."""
+    return role_required("Admin", "Manager")(function)
+
+
 def get_employee_name(employee_id):
     conn = get_db()
     try:
@@ -175,6 +183,21 @@ def get_employee_name(employee_id):
 
 def create_table():
     initialize_app_database()
+
+
+@app.route("/api/admin/train-face-model", methods=["POST"])
+@role_required("Admin", "Manager")
+def api_train_face_model():
+    try:
+        from face_recognition import train_model
+        train_model()
+    except Exception as error:
+        app.logger.exception("Face model training failed.")
+        return json_error(str(error), 400)
+
+    user = get_logged_in_user()
+    log_activity(user["user_id"], "TRAIN_FACE_MODEL", "Face model retrained.")
+    return jsonify({"success": True, "message": "Face model trained successfully."})
 
 
 # ============================================================
@@ -202,7 +225,7 @@ def login():
         return json_error("Invalid username or password.", 401)
 
     user_data = {
-        "user_id": user["user_id"],
+        "user_id": user["id"],
         "username": user["username"],
         "role": user["role"],
         "employee_id": user["employee_id"]
@@ -313,27 +336,35 @@ def setup_admin():
     conn = get_db()
 
     try:
+        conn.execute("BEGIN IMMEDIATE")
         count = conn.execute(
             "SELECT COUNT(*) FROM users"
         ).fetchone()[0]
-    finally:
-        conn.close()
 
-    if count > 0:
-        return json_error(
-            "Admin setup is already completed.",
-            403
-        )
+        if count > 0:
+            conn.rollback()
+            return json_error(
+                "Admin setup is already completed.",
+                403
+            )
 
-    try:
-        create_user(
+        created = create_user(
             username=username,
             password=password,
             role="Admin",
-            employee_id=None
+            employee_id=None,
+            connection=conn
         )
+        if not created:
+            conn.rollback()
+            return json_error("Could not create administrator account.", 409)
+        conn.commit()
     except Exception as error:
+        conn.rollback()
+        app.logger.exception("First administrator setup failed.")
         return json_error(str(error), 400)
+    finally:
+        conn.close()
 
     return jsonify({
         "success": True,
@@ -346,6 +377,7 @@ def setup_admin():
 # ============================================================
 
 @app.route("/employee_photo/<employee_id>")
+@login_required
 def employee_photo(employee_id):
     conn = get_db()
 
@@ -378,6 +410,7 @@ def employee_photo(employee_id):
 # ============================================================
 
 @app.route("/")
+@admin_or_manager_required
 def home():
     return render_template("register.html")
 
@@ -387,6 +420,7 @@ def home():
 # ============================================================
 
 @app.route("/register", methods=["POST"])
+@admin_or_manager_required
 def register():
 
     employee_id = request.form.get("employee_id", "").strip()
@@ -554,6 +588,7 @@ def register():
 # ============================================================
 
 @app.route("/employees")
+@login_required
 def employee_list():
     conn = get_db()
 
@@ -576,6 +611,7 @@ def employee_list():
 
 
 @app.route("/api/employees", methods=["GET"])
+@login_required
 def api_employees():
     conn = get_db()
 
@@ -604,6 +640,7 @@ def api_employees():
 
 
 @app.route("/api/employees/<employee_id>", methods=["GET"])
+@login_required
 def api_employee_profile(employee_id):
     conn = get_db()
 
@@ -676,6 +713,7 @@ def update_employee_status(employee_id):
 # ============================================================
 
 @app.route("/video_feed")
+@role_required("Admin", "Manager")
 def video_feed():
     return Response(
         generate_video_frames(),
@@ -687,11 +725,13 @@ def video_feed():
 
 
 @app.route("/camera_status")
+@role_required("Admin", "Manager")
 def camera_status():
     return jsonify(get_camera_status())
 
 
 @app.route("/start_camera", methods=["POST"])
+@role_required("Admin", "Manager")
 def start_camera():
     started = start_camera_worker()
 
@@ -707,6 +747,7 @@ def start_camera():
 
 
 @app.route("/stop_camera", methods=["POST"])
+@role_required("Admin", "Manager")
 def stop_camera():
     status = stop_camera_worker()
 
@@ -722,6 +763,7 @@ def stop_camera():
 # ============================================================
 
 @app.route("/attendance")
+@login_required
 def attendance_dashboard():
 
     today = date.today().isoformat()
@@ -944,6 +986,7 @@ def get_report_data(report_type, selected_date, selected_month):
 # ============================================================
 
 @app.route("/reports")
+@login_required
 def attendance_reports():
 
     report_type = request.args.get("type", "daily")
@@ -987,6 +1030,7 @@ def attendance_reports():
 # ============================================================
 
 @app.route("/reports/export")
+@login_required
 def export_attendance_report():
 
     report_type = request.args.get("type", "daily")
@@ -1041,6 +1085,7 @@ def export_attendance_report():
 # ============================================================
 
 @app.route("/reports/export/xml")
+@login_required
 def export_attendance_xml():
 
     selected_date = valid_iso_date(
@@ -1181,6 +1226,7 @@ def export_attendance_xml():
 # ============================================================
 
 @app.route("/api/attendance/daily")
+@login_required
 def api_daily_attendance():
 
     selected_date = valid_iso_date(
@@ -1216,6 +1262,7 @@ def api_daily_attendance():
 
 
 @app.route("/api/attendance/monthly")
+@login_required
 def api_monthly_attendance():
 
     month = request.args.get(
@@ -1258,6 +1305,7 @@ def api_monthly_attendance():
 
 
 @app.route("/api/employees/<employee_id>/attendance")
+@login_required
 def api_employee_history(employee_id):
 
     conn = get_db()
@@ -2032,8 +2080,29 @@ def employee_documents(employee_id):
 @app.route("/employee_documents/<path:filename>")
 @login_required
 def download_employee_document(filename):
-
     safe_filename = os.path.basename(filename)
+    user = get_logged_in_user()
+
+    conn = get_db()
+    try:
+        document = conn.execute(
+            "SELECT employee_id FROM employee_documents WHERE file_path = ?",
+            (safe_filename,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not document:
+        return "Document not found.", 404
+
+    if (
+        user["role"] == "Employee"
+        and user.get("employee_id") != document[0]
+    ):
+        return json_error("Permission denied.", 403)
+
+    if user["role"] not in ("Admin", "Manager", "Employee"):
+        return json_error("Permission denied.", 403)
 
     return send_from_directory(
         DOCUMENT_FOLDER,
@@ -2205,8 +2274,8 @@ if __name__ == "__main__":
     print("=" * 55)
 
     app.run(
-        host="127.0.0.1",
-        port=5000,
+        host=os.environ.get("FLASK_HOST", "127.0.0.1"),
+        port=int(os.environ.get("FLASK_PORT", "5000")),
         debug=False,
         use_reloader=False,
         threaded=True

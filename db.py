@@ -221,7 +221,8 @@ def create_user(
     username,
     password,
     role,
-    employee_id=None
+    employee_id=None,
+    connection=None
 ):
 
     allowed_roles = [
@@ -235,7 +236,8 @@ def create_user(
 
     password_hash = hash_password(password)
 
-    conn = get_connection()
+    owns_connection = connection is None
+    conn = connection or get_connection()
 
     try:
 
@@ -260,11 +262,13 @@ def create_user(
 
     except sqlite3.IntegrityError:
 
-        conn.rollback()
+        if owns_connection:
+            conn.rollback()
         return False
 
     finally:
-        conn.close()
+        if owns_connection:
+            conn.close()
 
 
 def authenticate_user(username, password):

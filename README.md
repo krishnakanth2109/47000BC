@@ -1,155 +1,193 @@
-# AI-Based CCTV Employee Attendance Management System
+# CCTV Attendance System v2.0
 
-## Project Overview
+A complete CCTV-based employee attendance system rebuilt with a modern production stack.
 
-The AI-Based CCTV Employee Attendance Management System is a Python-based application that automates employee attendance using CCTV cameras and face recognition technology.
+## 🏗️ Tech Stack
 
-The system identifies registered employees, records their entry and exit times, stores attendance information in an SQLite database, and provides a web-based dashboard using Flask.
+| Layer | Technology |
+|-------|-----------|
+| Backend API | **FastAPI** (Python) |
+| Database | **Neon** (PostgreSQL, serverless) |
+| Cache & Pub/Sub | **Redis** (Upstash or local) |
+| Auth | **Firebase Authentication** (session cookies) |
+| Image Storage | **Cloudinary** (authenticated, signed URLs) |
+| Face Recognition | **OpenCV LBPH** (stored in Neon as bytea) |
+| Frontend | **React 19 + Vite** |
+| Real-time | **WebSockets** (Redis pub/sub push) |
 
-## Key Features
+---
 
-- **Face Recognition:** Identifies registered employees using OpenCV and LBPH.
-- **CCTV Integration:** Connects to TP-Link Tapo C500 CCTV cameras through RTSP.
-- **Automatic Attendance:** Records employee check-in and check-out events.
-- **Employee Management:** Supports employee registration and face training.
-- **Database Management:** Stores employee and attendance records using SQLite.
-- **Live Dashboard:** Displays CCTV video and attendance information through Flask.
-- **Attendance Reports:** Generates daily attendance reports in XML and CSV formats.
-- **Break Tracking:** Maintains employee break records.
+## 📁 Project Structure
 
-## Technologies Used
-
-| Technology | Purpose |
-|---|---|
-| Python | Backend development |
-| OpenCV | Image processing |
-| LBPH | Face recognition |
-| Haar Cascade | Face detection |
-| YOLO | Object detection |
-| Flask | Web application |
-| SQLite | Database |
-| HTML, CSS | Frontend |
-| XML, CSV | Report generation |
-| RTSP | CCTV video streaming |
-
-## Project Structure
-
-```text
-CCTV_Attendance_System/
-│
-├── app.py
-├── db.py
-├── detection.py
-├── face_recognition.py
-├── reports.py
-├── requirements.txt
-│
-├── employees/
-│   └── training_photos/
-│
-├── database/
-│   └── attendance.db
-│
-├── models/
-│   ├── face_model.yml
-│   └── labels.json
-│
-├── templates/
-│   ├── register.html
-│   ├── employees.html
-│   ├── attendance.html
-│   └── reports.html
-│
-├── reports/
-│
+```
+CCTV-Attendance-System/
+├── backend/
+│   ├── main.py           ← FastAPI application (all routes)
+│   └── requirements.txt  ← Python dependencies
+├── frontend/
+│   ├── src/
+│   │   ├── main.jsx              ← React entry point
+│   │   ├── App.jsx               ← Router + auth guards
+│   │   ├── firebase.js           ← Firebase web config
+│   │   ├── api.js                ← Fetch helper (cookies)
+│   │   ├── contexts/
+│   │   │   └── AuthContext.jsx   ← Auth state + login/logout
+│   │   ├── hooks/
+│   │   │   └── useWebSocket.js   ← WS with auto-reconnect
+│   │   ├── pages/
+│   │   │   ├── LoginPage.jsx
+│   │   │   ├── DashboardPage.jsx
+│   │   │   ├── EmployeesPage.jsx
+│   │   │   └── AttendancePage.jsx
+│   │   └── components/
+│   │       └── Layout.jsx        ← Sidebar + nav
+│   ├── index.html
+│   ├── package.json
+│   └── vite.config.js           ← Dev proxy to :8000
 ├── haarcascade_frontalface_default.xml
-├── yolo11n.pt
-└── README.md
+├── .env                         ← Your actual secrets (gitignored)
+├── .env.example                 ← Template to copy from
+└── start.js                     ← Launch both servers at once
 ```
 
-## Installation and Setup
+---
 
-### 1. Clone the repository
+## ⚡ Quick Start
+
+### 1. Set up environment variables
 
 ```bash
-git clone https://github.com/Varshini314-alp/CCTV-Attendance-System.git
+cp .env.example .env
+# Then edit .env with your credentials
 ```
 
-### 2. Navigate to the project folder
+### 2. Install backend dependencies
 
 ```bash
-cd CCTV-Attendance-System
-```
-
-### 3. Create a virtual environment
-
-```bash
+# Create a virtual environment
 python -m venv .venv
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # Mac/Linux
+
+pip install -r backend/requirements.txt
 ```
 
-### 4. Activate the virtual environment
-
-Windows PowerShell:
-
-```powershell
-.venv\Scripts\Activate.ps1
-```
-
-### 5. Install dependencies
+### 3. Install frontend dependencies
 
 ```bash
-pip install -r requirements.txt
+cd frontend
+npm install
+cd ..
 ```
 
-### 6. Configure CCTV
+### 4. Start the development servers
 
-Set your Tapo camera RTSP URL using an environment variable.
-
-```powershell
-$env:TAPO_RTSP_URL = "rtsp://USERNAME:PASSWORD@CAMERA_IP:554/stream1"
-```
-
-Replace the placeholders with your camera details. Never publish your camera credentials.
-
-### 7. Run the application
+**Option A — Two terminals:**
 
 ```bash
-python app.py
+# Terminal 1 — FastAPI backend
+cd backend
+uvicorn main:app --reload --port 8000
+
+# Terminal 2 — Vite frontend
+cd frontend
+npm run dev
 ```
 
-Open the dashboard in your browser:
+**Option B — Single command:**
 
-```text
-http://127.0.0.1:5000
+```bash
+node start.js
 ```
 
-## Attendance Workflow
+Open **http://localhost:5173** in your browser.
 
-1. Register employees with their details and photographs.
-2. Train the face recognition model.
-3. Connect the CCTV camera.
-4. Detect and recognize employees.
-5. Record employee entry and exit events.
-6. Store attendance information in SQLite.
-7. Generate attendance reports.
+---
 
-## Future Enhancements
+## 🔧 Configuration (.env)
 
-- Multiple CCTV camera integration.
-- Centralized monitoring of multiple office locations.
-- Improved face recognition accuracy.
-- Advanced employee analytics.
-- Cloud-based attendance management.
-- Role-based authentication and access control.
+| Variable | Description |
+|----------|-------------|
+| `DATABASE_URL` | Neon PostgreSQL connection string |
+| `REDIS_URL` | Redis URL (Upstash or local) |
+| `CLOUDINARY_CLOUD_NAME` | Cloudinary cloud name |
+| `CLOUDINARY_API_KEY` | Cloudinary API key |
+| `CLOUDINARY_API_SECRET` | Cloudinary API secret |
+| `FIREBASE_SERVICE_ACCOUNT_PATH` | Path to Firebase service account JSON |
+| `FIREBASE_PROJECT_ID` | Firebase project ID |
+| `VITE_FIREBASE_API_KEY` | Firebase web API key (used by React) |
+| `VITE_FIREBASE_AUTH_DOMAIN` | Firebase auth domain |
+| `VITE_FIREBASE_PROJECT_ID` | Firebase project ID (for React) |
+| `ADMIN_UIDS` | Comma-separated Firebase UIDs with admin access |
+| `TAPO_RTSP_URL` | RTSP URL of your Tapo C500 camera |
+| `CAMERA_DIRECTION` | `in` (checkin) or `out` (checkout) |
+| `FACE_THRESHOLD` | LBPH confidence threshold (default: `65`) |
+| `APP_ORIGIN` | Frontend URL for CORS (`http://localhost:5173`) |
+| `COOKIE_SECURE` | `true` in production (requires HTTPS) |
 
-## Author
+---
 
-**Varshini M**
+## 📡 API Endpoints
 
-AI/ML Project Developer
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/config` | Firebase web config |
+| `POST` | `/api/session` | Login (Firebase token → session cookie) |
+| `DELETE` | `/api/session` | Logout |
+| `GET` | `/api/me` | Current user info |
+| `GET` | `/api/dashboard` | Stats + recent events |
+| `GET` | `/api/employees` | List employees |
+| `POST` | `/api/employees` | Enroll new employee (with face photos) |
+| `PUT` | `/api/employees/{id}/status` | Activate/deactivate |
+| `DELETE` | `/api/employees/{id}` | Delete employee |
+| `GET` | `/api/attendance` | Attendance records with filters |
+| `GET` | `/api/reports/export` | Download CSV |
+| `GET` | `/api/camera/status` | Camera status |
+| `POST` | `/api/camera/start` | Start CCTV recognition |
+| `POST` | `/api/camera/stop` | Stop camera |
+| `GET` | `/api/events/{id}/snapshot` | Signed Cloudinary URL for capture |
+| `POST` | `/api/admin/train` | Re-train face model |
+| `WS` | `/api/live` | WebSocket (real-time push) |
 
-GitHub: https://github.com/Varshini314-alp
+---
 
-## License
+## 🔐 Authentication Flow
 
-This project is developed for educational and demonstration purposes.
+1. User enters **email + password** in React frontend
+2. Firebase Auth verifies credentials client-side
+3. Firebase issues an **ID token** (short-lived)
+4. Frontend sends the ID token to `POST /api/session`
+5. FastAPI verifies the token with Firebase Admin SDK
+6. FastAPI creates a **session cookie** (HttpOnly, 8 hours)
+7. All subsequent API requests use the session cookie
+8. Firebase client state is immediately discarded (security)
+
+---
+
+## 🎥 How Face Recognition Works
+
+1. Admin registers an employee with 3–10 face photos
+2. Face crops are extracted with Haar Cascade and stored as `bytea` in Neon
+3. When the camera starts, an LBPH model is trained in-memory from stored crops
+4. The CCTV stream is read via OpenCV RTSP
+5. Each frame is scanned for faces; matched faces accumulate a "streak" counter
+6. After **5 consecutive** recognized frames, attendance is recorded
+7. The capture frame is uploaded to Cloudinary (authenticated)
+8. Redis publishes a `refresh` message
+9. All connected WebSocket clients receive the update instantly
+
+---
+
+## 🚀 Production Build
+
+```bash
+cd frontend
+npm run build
+# dist/ folder is served by FastAPI StaticFiles
+```
+
+Then run only the backend:
+```bash
+cd backend
+uvicorn main:app --host 0.0.0.0 --port 8000
+```

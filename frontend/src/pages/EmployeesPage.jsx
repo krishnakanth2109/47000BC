@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { apiFetch, apiGet } from "../api.js";
+import { apiFetch, apiGet, resolveMediaUrl } from "../api.js";
 
 export default function EmployeesPage() {
   const [employees, setEmployees] = useState([]);
@@ -244,7 +244,7 @@ export default function EmployeesPage() {
                       {emp.photo_url ? (
                         <div className="flex items-center gap-2.5">
                           <img
-                            src={emp.photo_url}
+                            src={resolveMediaUrl(emp.photo_url)}
                             alt={emp.name}
                             className="h-8 w-8 rounded-full object-cover"
                           />

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { Link } from "react-router-dom";
-import { apiGet, apiPost, apiPut, apiDelete } from "../api.js";
+import { apiGet, apiPost, apiPut, apiDelete, apiUrl } from "../api.js";
 
 const MONTHS = [
   "January", "February", "March", "April", "May", "June",
@@ -196,7 +196,7 @@ export default function PayrollPage() {
 
   function handleExportCsv() {
     const params = new URLSearchParams({ month: String(month), year: String(year) });
-    window.open(`/api/payroll/export?${params}`, "_blank");
+    window.open(apiUrl(`payroll/export?${params}`), "_blank");
   }
 
   const summary = payrollData?.summary;

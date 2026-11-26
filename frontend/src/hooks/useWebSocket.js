@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { wsUrl } from "../api.js";
 
 /**
  * useWebSocket — connects to the backend WebSocket at /api/live
- * and calls onMessage() whenever a text message arrives.
- * Auto-reconnects on disconnect.
+ * (using VITE_API_URL / VITE_RENDER_URL when set) and calls onMessage()
+ * whenever a text message arrives. Auto-reconnects on disconnect.
  */
 export function useWebSocket(onMessage, enabled = true) {
   const wsRef = useRef(null);
@@ -12,8 +13,7 @@ export function useWebSocket(onMessage, enabled = true) {
   const connect = useCallback(() => {
     if (!enabled) return;
 
-    const protocol = location.protocol === "https:" ? "wss" : "ws";
-    const url = `${protocol}://${location.host}/api/live`;
+    const url = wsUrl("live");
     const ws = new WebSocket(url);
 
     ws.onopen = () => setConnected(true);

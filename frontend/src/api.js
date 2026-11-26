@@ -1,11 +1,43 @@
 /**
- * API helper — wraps fetch with cookie credentials and JSON parsing.
- * Base URL is relative so it works both dev (proxied) and production.
+ * API helper — wraps fetch with cookie credentials, Render/backend URL support,
+ * and JSON parsing. Uses relative /api locally (Vite proxy) or
+ * VITE_API_URL / VITE_RENDER_URL / VITE_BACKEND_URL when configured.
  */
-const BASE = "/api";
+export const BACKEND_ORIGIN = (
+  import.meta.env.VITE_API_URL ||
+  import.meta.env.VITE_RENDER_URL ||
+  import.meta.env.VITE_BACKEND_URL ||
+  ""
+)
+  .trim()
+  .replace(/\/+$/, "");
+
+const BASE = `${BACKEND_ORIGIN}/api`;
+
+export function apiUrl(path = "") {
+  const clean = String(path).replace(/^\/+/, "");
+  return clean ? `${BASE}/${clean}` : BASE;
+}
+
+export function resolveMediaUrl(url) {
+  if (!url) return "";
+  if (/^(https?:|data:|blob:)/i.test(url)) return url;
+  if (url.startsWith("/")) return `${BACKEND_ORIGIN}${url}`;
+  return `${BACKEND_ORIGIN}/${url}`;
+}
+
+export function wsUrl(path = "live") {
+  const clean = String(path).replace(/^\/+/, "");
+  if (BACKEND_ORIGIN) {
+    const wsOrigin = BACKEND_ORIGIN.replace(/^http/i, "ws");
+    return `${wsOrigin}/api/${clean}`;
+  }
+  const protocol = location.protocol === "https:" ? "wss" : "ws";
+  return `${protocol}://${location.host}/api/${clean}`;
+}
 
 export async function apiFetch(path, options = {}) {
-  const response = await fetch(`${BASE}/${path}`, {
+  const response = await fetch(apiUrl(path), {
     credentials: "include", // Always send cookies (session cookie)
     ...options,
   });

@@ -94,6 +94,7 @@ from starlette.concurrency import run_in_threadpool
 APP_ORIGIN      = os.getenv("APP_ORIGIN", "http://localhost:5173")
 APP_ORIGINS     = [o.strip().rstrip("/") for o in APP_ORIGIN.split(",") if o.strip()]
 COOKIE_SECURE   = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "none" if COOKIE_SECURE else "lax").lower()
 SESSION_MAX_AGE = int(os.getenv("SESSION_MAX_AGE", "28800"))   # 8 hours
 TZ              = os.getenv("ATTENDANCE_TIMEZONE", "Asia/Kolkata")
 OFFICE_START    = os.getenv("OFFICE_START_TIME", "09:30")
@@ -588,6 +589,12 @@ class LoginPayload(BaseModel):
     token: str
 
 
+@app.get("/api/health")
+def health():
+    """Health check endpoint for Render / load balancers."""
+    return {"status": "ok"}
+
+
 @app.get("/api/config")
 def get_firebase_config():
     """Return public Firebase web config (safe to expose)."""
@@ -631,7 +638,7 @@ def login(body: LoginPayload, response: Response):
         session_cookie,
         httponly=True,
         secure=COOKIE_SECURE,
-        samesite="strict",
+        samesite=COOKIE_SAMESITE,
         max_age=SESSION_MAX_AGE,
     )
 
@@ -655,7 +662,7 @@ def logout(response: Response, user: dict = Depends(admin_user)):
         firebase_auth.revoke_refresh_tokens(user["uid"], app=get_firebase_app())
     except Exception:
         pass
-    response.delete_cookie("session", samesite="strict")
+    response.delete_cookie("session", path="/", secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE)
     return {"ok": True}
 
 

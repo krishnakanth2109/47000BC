@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { Link } from "react-router-dom";
-import { apiDelete, apiGet, apiPost } from "../api.js";
+import { apiDelete, apiGet, apiPost, apiUrl } from "../api.js";
 import { useWebSocket } from "../hooks/useWebSocket.js";
 
 function shiftIsoDate(isoDate, deltaDays) {
@@ -231,7 +231,7 @@ export default function AttendancePage() {
       activeTab === "daily"
         ? new URLSearchParams({ start_date: selectedDate, end_date: selectedDate })
         : new URLSearchParams({ start_date: startDate, end_date: endDate });
-    window.open(`/api/reports/export?${params}`, "_blank");
+    window.open(apiUrl(`reports/export?${params}`), "_blank");
   }
 
   const overview = dailyData?.overview;
@@ -587,7 +587,7 @@ export default function AttendancePage() {
                                 <SourceChip source={rec.check_in_source} />
                                 {rec.check_in_has_photo && rec.check_in_event_id && (
                                   <a
-                                    href={`/api/events/${rec.check_in_event_id}/snapshot`}
+                                    href={apiUrl(`events/${rec.check_in_event_id}/snapshot`)}
                                     target="_blank"
                                     rel="noreferrer"
                                     className="font-medium text-blue-600 hover:underline"
@@ -612,7 +612,7 @@ export default function AttendancePage() {
                                 <SourceChip source={rec.check_out_source} />
                                 {rec.check_out_has_photo && rec.check_out_event_id && (
                                   <a
-                                    href={`/api/events/${rec.check_out_event_id}/snapshot`}
+                                    href={apiUrl(`events/${rec.check_out_event_id}/snapshot`)}
                                     target="_blank"
                                     rel="noreferrer"
                                     className="font-medium text-blue-600 hover:underline"
@@ -794,7 +794,7 @@ export default function AttendancePage() {
                           <td className="px-3 py-3">
                             {r.image_url ? (
                               <a
-                                href={`/api/events/${r.id}/snapshot`}
+                                href={apiUrl(`events/${r.id}/snapshot`)}
                                 target="_blank"
                                 rel="noreferrer"
                                 className="font-medium text-blue-600 hover:underline"

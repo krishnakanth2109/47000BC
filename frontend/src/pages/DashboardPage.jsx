@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { apiGet, apiPost } from "../api.js";
+import { apiGet, apiPost, apiUrl } from "../api.js";
 import { useWebSocket } from "../hooks/useWebSocket.js";
 
 export default function DashboardPage() {
@@ -136,7 +136,7 @@ export default function DashboardPage() {
                     <td className="px-3 py-3">
                       {ev.image_url ? (
                         <a
-                          href={`/api/events/${ev.id}/snapshot`}
+                          href={apiUrl(`events/${ev.id}/snapshot`)}
                           target="_blank"
                           rel="noreferrer"
                           className="font-medium text-blue-600 hover:underline"

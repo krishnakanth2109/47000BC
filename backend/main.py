@@ -21,6 +21,7 @@ import base64
 import hashlib
 import asyncio
 import threading
+import calendar
 from datetime import datetime, timedelta, date, time as dt_time
 from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
@@ -194,6 +195,42 @@ def run_migrations():
                 uid         TEXT PRIMARY KEY,
                 email       TEXT DEFAULT '',
                 created_at  TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS cctv_salary_structure (
+                employee_id   TEXT PRIMARY KEY REFERENCES cctv_employee(id) ON DELETE CASCADE,
+                basic_salary  NUMERIC(12,2) NOT NULL DEFAULT 0,
+                hra           NUMERIC(12,2) NOT NULL DEFAULT 0,
+                allowances    NUMERIC(12,2) NOT NULL DEFAULT 0,
+                deductions    NUMERIC(12,2) NOT NULL DEFAULT 0,
+                overtime_rate NUMERIC(10,2) NOT NULL DEFAULT 0,
+                updated_at    TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS cctv_payroll (
+                id              BIGSERIAL PRIMARY KEY,
+                employee_id     TEXT NOT NULL REFERENCES cctv_employee(id) ON DELETE CASCADE,
+                pay_month       INT NOT NULL CHECK (pay_month BETWEEN 1 AND 12),
+                pay_year        INT NOT NULL CHECK (pay_year BETWEEN 2000 AND 2100),
+                working_days    INT NOT NULL DEFAULT 22,
+                present_days    INT NOT NULL DEFAULT 0,
+                absent_days     INT NOT NULL DEFAULT 0,
+                late_days       INT NOT NULL DEFAULT 0,
+                worked_hours    NUMERIC(10,2) NOT NULL DEFAULT 0,
+                overtime_hours  NUMERIC(10,2) NOT NULL DEFAULT 0,
+                overtime_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+                basic_salary    NUMERIC(12,2) NOT NULL DEFAULT 0,
+                hra             NUMERIC(12,2) NOT NULL DEFAULT 0,
+                allowances      NUMERIC(12,2) NOT NULL DEFAULT 0,
+                gross_salary    NUMERIC(12,2) NOT NULL DEFAULT 0,
+                deductions      NUMERIC(12,2) NOT NULL DEFAULT 0,
+                net_salary      NUMERIC(12,2) NOT NULL DEFAULT 0,
+                payment_status  TEXT NOT NULL DEFAULT 'Pending' CHECK (payment_status IN ('Pending', 'Processed', 'Paid')),
+                payment_date    DATE,
+                generated_at    TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(employee_id, pay_month, pay_year)
             )
         """)
 
@@ -1189,6 +1226,473 @@ def export_csv(
     output.seek(0)
 
     filename = f"attendance_{start_date}_{end_date}.csv"
+    return StreamingResponse(
+        iter([output.read()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ===========================================================================
+# 11B. SALARY STRUCTURE & ATTENDANCE-BASED PAYROLL ENDPOINTS
+# ===========================================================================
+
+class SalaryStructurePayload(BaseModel):
+    employee_id: str
+    basic_salary: float = 0
+    hra: float = 0
+    allowances: float = 0
+    deductions: float = 0
+    overtime_rate: float = 0
+
+
+class PayrollGeneratePayload(BaseModel):
+    month: int
+    year: int
+    working_days: Optional[int] = None
+    standard_daily_hours: float = 8.0
+    employee_id: Optional[str] = None
+
+
+class PayrollPaymentPayload(BaseModel):
+    payment_status: Literal["Pending", "Processed", "Paid"]
+
+
+def _default_working_days(year: int, month: int) -> int:
+    """Count weekdays (Mon-Fri) in the given month."""
+    _, days_in_month = calendar.monthrange(year, month)
+    return sum(
+        1 for d in range(1, days_in_month + 1)
+        if date(year, month, d).weekday() < 5
+    )
+
+
+def _validate_month_year(month: int, year: int):
+    if not 1 <= month <= 12:
+        raise HTTPException(422, "month must be between 1 and 12")
+    if not 2000 <= year <= 2100:
+        raise HTTPException(422, "year must be between 2000 and 2100")
+
+
+@app.get("/api/salary-structures")
+def list_salary_structures(_: dict = Depends(admin_user)):
+    """List all active employees along with their configured salary structure."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                e.id AS employee_id, e.name, e.department, e.designation, e.status,
+                COALESCE(s.basic_salary, 0)::FLOAT AS basic_salary,
+                COALESCE(s.hra, 0)::FLOAT AS hra,
+                COALESCE(s.allowances, 0)::FLOAT AS allowances,
+                COALESCE(s.deductions, 0)::FLOAT AS deductions,
+                COALESCE(s.overtime_rate, 0)::FLOAT AS overtime_rate,
+                (s.employee_id IS NOT NULL) AS configured,
+                s.updated_at
+            FROM cctv_employee e
+            LEFT JOIN cctv_salary_structure s ON s.employee_id = e.id
+            WHERE e.status = 'Active'
+            ORDER BY e.name, e.id
+            """
+        ).fetchall()
+    return rows
+
+
+@app.post("/api/salary-structures")
+def upsert_salary_structure(
+    body: SalaryStructurePayload,
+    user: dict = Depends(admin_user),
+):
+    """Create or update an employee's monthly salary structure."""
+    amounts = [body.basic_salary, body.hra, body.allowances, body.deductions, body.overtime_rate]
+    if any(v < 0 for v in amounts):
+        raise HTTPException(422, "Salary amounts cannot be negative")
+
+    with get_db() as conn:
+        emp = conn.execute(
+            "SELECT id, name FROM cctv_employee WHERE id = %s",
+            (body.employee_id,),
+        ).fetchone()
+        if not emp:
+            raise HTTPException(404, "Employee not found")
+
+        row = conn.execute(
+            """
+            INSERT INTO cctv_salary_structure
+                (employee_id, basic_salary, hra, allowances, deductions, overtime_rate, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (employee_id) DO UPDATE SET
+                basic_salary = EXCLUDED.basic_salary,
+                hra = EXCLUDED.hra,
+                allowances = EXCLUDED.allowances,
+                deductions = EXCLUDED.deductions,
+                overtime_rate = EXCLUDED.overtime_rate,
+                updated_at = NOW()
+            RETURNING employee_id, basic_salary::FLOAT, hra::FLOAT, allowances::FLOAT,
+                      deductions::FLOAT, overtime_rate::FLOAT, updated_at
+            """,
+            (
+                body.employee_id,
+                round(body.basic_salary, 2),
+                round(body.hra, 2),
+                round(body.allowances, 2),
+                round(body.deductions, 2),
+                round(body.overtime_rate, 2),
+            ),
+        ).fetchone()
+
+        conn.execute(
+            "INSERT INTO activity_log (uid, action, description) VALUES (%s, %s, %s)",
+            (user["uid"], "SALARY_STRUCTURE", f"Updated salary structure for {body.employee_id}"),
+        )
+
+    return {"ok": True, "structure": row}
+
+
+@app.get("/api/payroll")
+def list_payroll(
+    month: Optional[int] = Query(None),
+    year: Optional[int] = Query(None),
+    q: str = Query(""),
+    status: str = Query("all"),
+    _: dict = Depends(admin_user),
+):
+    """List generated monthly payroll records and summary totals."""
+    now_local = datetime.now(ZoneInfo(TZ)).date()
+    m = month or now_local.month
+    y = year or now_local.year
+    _validate_month_year(m, y)
+
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                p.id, p.employee_id, e.name, e.department, e.designation,
+                p.pay_month, p.pay_year, p.working_days, p.present_days, p.absent_days,
+                p.late_days, p.worked_hours::FLOAT, p.overtime_hours::FLOAT,
+                p.overtime_amount::FLOAT, p.basic_salary::FLOAT, p.hra::FLOAT,
+                p.allowances::FLOAT, p.gross_salary::FLOAT, p.deductions::FLOAT,
+                p.net_salary::FLOAT, p.payment_status, p.payment_date, p.generated_at
+            FROM cctv_payroll p
+            JOIN cctv_employee e ON e.id = p.employee_id
+            WHERE p.pay_month = %s AND p.pay_year = %s
+            ORDER BY e.name, p.employee_id
+            """,
+            (m, y),
+        ).fetchall()
+
+        unconfigured_cnt = conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM cctv_employee e
+            LEFT JOIN cctv_salary_structure s ON s.employee_id = e.id
+            WHERE e.status = 'Active' AND s.employee_id IS NULL
+            """
+        ).fetchone()["cnt"]
+
+        active_cnt = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM cctv_employee WHERE status = 'Active'"
+        ).fetchone()["cnt"]
+
+    total_gross = round(sum(r["gross_salary"] for r in rows), 2)
+    total_deductions = round(sum(r["deductions"] for r in rows), 2)
+    total_net = round(sum(r["net_salary"] for r in rows), 2)
+    total_present = sum(r["present_days"] for r in rows)
+    total_hours = round(sum(r["worked_hours"] for r in rows), 2)
+    pending_cnt = sum(1 for r in rows if r["payment_status"] == "Pending")
+    processed_cnt = sum(1 for r in rows if r["payment_status"] == "Processed")
+    paid_cnt = sum(1 for r in rows if r["payment_status"] == "Paid")
+
+    q_lower = q.strip().lower()
+    status_norm = status.strip().lower()
+    filtered = []
+    for r in rows:
+        if q_lower and not any(
+            q_lower in (r[f] or "").lower()
+            for f in ("employee_id", "name", "department", "designation")
+        ):
+            continue
+        if status_norm != "all" and r["payment_status"].lower() != status_norm:
+            continue
+        filtered.append(r)
+
+    return {
+        "summary": {
+            "month": m,
+            "year": y,
+            "default_working_days": _default_working_days(y, m),
+            "active_employees": active_cnt,
+            "unconfigured_structures": unconfigured_cnt,
+            "total_records": len(rows),
+            "total_gross": total_gross,
+            "total_deductions": total_deductions,
+            "total_net": total_net,
+            "total_present_days": total_present,
+            "total_worked_hours": total_hours,
+            "pending_count": pending_cnt,
+            "processed_count": processed_cnt,
+            "paid_count": paid_cnt,
+        },
+        "records": filtered,
+    }
+
+
+@app.post("/api/payroll/generate")
+def generate_payroll(
+    body: PayrollGeneratePayload,
+    user: dict = Depends(admin_user),
+):
+    """Generate or recalculate payroll for a month from attendance events and salary structures."""
+    _validate_month_year(body.month, body.year)
+    working_days = body.working_days if body.working_days is not None else _default_working_days(body.year, body.month)
+    if working_days <= 0 or working_days > 31:
+        raise HTTPException(422, "working_days must be between 1 and 31")
+    if body.standard_daily_hours <= 0 or body.standard_daily_hours > 24:
+        raise HTTPException(422, "standard_daily_hours must be between 1 and 24")
+
+    _, last_dom = calendar.monthrange(body.year, body.month)
+    month_start = date(body.year, body.month, 1)
+    month_end = date(body.year, body.month, last_dom)
+    tz = ZoneInfo(TZ)
+    cutoff = _parse_office_start_time()
+
+    with get_db() as conn:
+        if body.employee_id:
+            employees = conn.execute(
+                """
+                SELECT e.id, e.name, s.basic_salary::FLOAT, s.hra::FLOAT,
+                       s.allowances::FLOAT, s.deductions::FLOAT, s.overtime_rate::FLOAT,
+                       (s.employee_id IS NOT NULL) AS configured
+                FROM cctv_employee e
+                LEFT JOIN cctv_salary_structure s ON s.employee_id = e.id
+                WHERE e.id = %s
+                """,
+                (body.employee_id,),
+            ).fetchall()
+            if not employees:
+                raise HTTPException(404, "Employee not found")
+        else:
+            employees = conn.execute(
+                """
+                SELECT e.id, e.name, s.basic_salary::FLOAT, s.hra::FLOAT,
+                       s.allowances::FLOAT, s.deductions::FLOAT, s.overtime_rate::FLOAT,
+                       (s.employee_id IS NOT NULL) AS configured
+                FROM cctv_employee e
+                LEFT JOIN cctv_salary_structure s ON s.employee_id = e.id
+                WHERE e.status = 'Active'
+                ORDER BY e.name, e.id
+                """
+            ).fetchall()
+
+        target_ids = [e["id"] for e in employees if e["configured"]]
+        skipped = [e["id"] for e in employees if not e["configured"]]
+
+        if not target_ids:
+            raise HTTPException(
+                422,
+                "No salary structures configured for the selected employee(s). Configure salary structures first.",
+            )
+
+        events = conn.execute(
+            """
+            SELECT employee_id, day, direction, occurred_at
+            FROM cctv_event
+            WHERE employee_id = ANY(%s)
+              AND day BETWEEN %s AND %s
+            ORDER BY day, occurred_at
+            """,
+            (target_ids, month_start, month_end),
+        ).fetchall()
+
+        # Group events by (employee_id, day)
+        by_emp_day: dict[str, dict[date, dict[str, datetime]]] = {}
+        for ev in events:
+            emp_days = by_emp_day.setdefault(ev["employee_id"], {})
+            day_pair = emp_days.setdefault(ev["day"], {})
+            day_pair[ev["direction"]] = ev["occurred_at"].astimezone(tz)
+
+        generated = 0
+        for emp in employees:
+            if not emp["configured"]:
+                continue
+
+            emp_days = by_emp_day.get(emp["id"], {})
+            present_days = 0
+            late_days = 0
+            worked_hours = 0.0
+            overtime_hours = 0.0
+
+            for day_pair in emp_days.values():
+                cin = day_pair.get("in")
+                cout = day_pair.get("out")
+                if cin:
+                    present_days += 1
+                    if cin.time() > cutoff:
+                        late_days += 1
+                if cin and cout and cout >= cin:
+                    day_hrs = (cout - cin).total_seconds() / 3600.0
+                    worked_hours += day_hrs
+                    if day_hrs > body.standard_daily_hours:
+                        overtime_hours += day_hrs - body.standard_daily_hours
+
+            absent_days = max(0, working_days - present_days)
+            ratio = min(1.0, present_days / working_days)
+
+            earned_basic = round(emp["basic_salary"] * ratio, 2)
+            earned_hra = round(emp["hra"] * ratio, 2)
+            earned_allowances = round(emp["allowances"] * ratio, 2)
+            ot_hrs_rounded = round(overtime_hours, 2)
+            ot_amount = round(ot_hrs_rounded * emp["overtime_rate"], 2)
+            gross = round(earned_basic + earned_hra + earned_allowances + ot_amount, 2)
+            deductions = round(emp["deductions"], 2)
+            net = round(max(0.0, gross - deductions), 2)
+
+            conn.execute(
+                """
+                INSERT INTO cctv_payroll (
+                    employee_id, pay_month, pay_year, working_days,
+                    present_days, absent_days, late_days, worked_hours,
+                    overtime_hours, overtime_amount, basic_salary, hra,
+                    allowances, gross_salary, deductions, net_salary,
+                    payment_status, payment_date, generated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'Pending', NULL, NOW())
+                ON CONFLICT (employee_id, pay_month, pay_year) DO UPDATE SET
+                    working_days = EXCLUDED.working_days,
+                    present_days = EXCLUDED.present_days,
+                    absent_days = EXCLUDED.absent_days,
+                    late_days = EXCLUDED.late_days,
+                    worked_hours = EXCLUDED.worked_hours,
+                    overtime_hours = EXCLUDED.overtime_hours,
+                    overtime_amount = EXCLUDED.overtime_amount,
+                    basic_salary = EXCLUDED.basic_salary,
+                    hra = EXCLUDED.hra,
+                    allowances = EXCLUDED.allowances,
+                    gross_salary = EXCLUDED.gross_salary,
+                    deductions = EXCLUDED.deductions,
+                    net_salary = EXCLUDED.net_salary,
+                    payment_status = CASE
+                        WHEN cctv_payroll.payment_status = 'Paid' THEN 'Paid'
+                        ELSE 'Pending'
+                    END,
+                    generated_at = NOW()
+                """,
+                (
+                    emp["id"], body.month, body.year, working_days,
+                    present_days, absent_days, late_days, round(worked_hours, 2),
+                    ot_hrs_rounded, ot_amount, earned_basic, earned_hra,
+                    earned_allowances, gross, deductions, net,
+                ),
+            )
+            generated += 1
+
+        conn.execute(
+            "INSERT INTO activity_log (uid, action, description) VALUES (%s, %s, %s)",
+            (
+                user["uid"],
+                "GENERATE_PAYROLL",
+                f"Generated payroll for {generated} employee(s) for {body.year}-{body.month:02d}",
+            ),
+        )
+
+    return {"ok": True, "generated": generated, "skipped_no_structure": skipped}
+
+
+@app.put("/api/payroll/{payroll_id}/payment")
+def update_payroll_payment(
+    payroll_id: int = PathParam(...),
+    body: PayrollPaymentPayload = ...,
+    user: dict = Depends(admin_user),
+):
+    """Update payroll payment status (Pending, Processed, or Paid)."""
+    pay_date = datetime.now(ZoneInfo(TZ)).date() if body.payment_status == "Paid" else None
+    with get_db() as conn:
+        row = conn.execute(
+            """
+            UPDATE cctv_payroll
+            SET payment_status = %s, payment_date = %s
+            WHERE id = %s
+            RETURNING id, employee_id, payment_status, payment_date
+            """,
+            (body.payment_status, pay_date, payroll_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Payroll record not found")
+
+        conn.execute(
+            "INSERT INTO activity_log (uid, action, description) VALUES (%s, %s, %s)",
+            (user["uid"], "PAYROLL_PAYMENT", f"Payroll #{payroll_id} marked {body.payment_status}"),
+        )
+
+    return {"ok": True, "record": row}
+
+
+@app.delete("/api/payroll/{payroll_id}")
+def delete_payroll_record(
+    payroll_id: int = PathParam(...),
+    user: dict = Depends(admin_user),
+):
+    """Delete a payroll record."""
+    with get_db() as conn:
+        cur = conn.execute("DELETE FROM cctv_payroll WHERE id = %s", (payroll_id,))
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Payroll record not found")
+        conn.execute(
+            "INSERT INTO activity_log (uid, action, description) VALUES (%s, %s, %s)",
+            (user["uid"], "DELETE_PAYROLL", f"Deleted payroll #{payroll_id}"),
+        )
+    return {"ok": True}
+
+
+@app.get("/api/payroll/export")
+def export_payroll_csv(
+    month: Optional[int] = Query(None),
+    year: Optional[int] = Query(None),
+    _: dict = Depends(admin_user),
+):
+    """Download monthly payroll as CSV."""
+    now_local = datetime.now(ZoneInfo(TZ)).date()
+    m = month or now_local.month
+    y = year or now_local.year
+    _validate_month_year(m, y)
+
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                p.employee_id, e.name, e.department, p.pay_month, p.pay_year,
+                p.working_days, p.present_days, p.absent_days, p.late_days,
+                p.worked_hours::FLOAT, p.overtime_hours::FLOAT, p.basic_salary::FLOAT,
+                p.hra::FLOAT, p.allowances::FLOAT, p.overtime_amount::FLOAT,
+                p.gross_salary::FLOAT, p.deductions::FLOAT, p.net_salary::FLOAT,
+                p.payment_status, p.payment_date
+            FROM cctv_payroll p
+            JOIN cctv_employee e ON e.id = p.employee_id
+            WHERE p.pay_month = %s AND p.pay_year = %s
+            ORDER BY e.name, p.employee_id
+            """,
+            (m, y),
+        ).fetchall()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Employee ID", "Name", "Department", "Month", "Year",
+        "Working Days", "Present Days", "Absent Days", "Late Days",
+        "Worked Hours", "Overtime Hours", "Basic", "HRA", "Allowances",
+        "Overtime Amount", "Gross Salary", "Deductions", "Net Salary",
+        "Status", "Payment Date",
+    ])
+    for r in rows:
+        writer.writerow([
+            r["employee_id"], r["name"], r["department"], r["pay_month"], r["pay_year"],
+            r["working_days"], r["present_days"], r["absent_days"], r["late_days"],
+            r["worked_hours"], r["overtime_hours"], r["basic_salary"], r["hra"],
+            r["allowances"], r["overtime_amount"], r["gross_salary"], r["deductions"],
+            r["net_salary"], r["payment_status"], r["payment_date"] or "",
+        ])
+    output.seek(0)
+    filename = f"payroll_{y}_{m:02d}.csv"
     return StreamingResponse(
         iter([output.read()]),
         media_type="text/csv",

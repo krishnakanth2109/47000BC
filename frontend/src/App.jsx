@@ -4,6 +4,7 @@ import LoginPage from "./pages/LoginPage.jsx";
 import DashboardPage from "./pages/DashboardPage.jsx";
 import EmployeesPage from "./pages/EmployeesPage.jsx";
 import AttendancePage from "./pages/AttendancePage.jsx";
+import PayrollPage from "./pages/PayrollPage.jsx";
 import Layout from "./components/Layout.jsx";
 
 function RequireAuth({ children }) {
@@ -57,6 +58,7 @@ export default function App() {
             <Route path="dashboard" element={<DashboardPage />} />
             <Route path="employees" element={<EmployeesPage />} />
             <Route path="attendance" element={<AttendancePage />} />
+            <Route path="payroll" element={<PayrollPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>

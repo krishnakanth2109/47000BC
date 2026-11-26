@@ -26,6 +26,7 @@ export default function Layout() {
           <NavItem to="/dashboard" icon="⊞" label="Dashboard" />
           <NavItem to="/employees" icon="👥" label="Employees" />
           <NavItem to="/attendance" icon="✓" label="Attendance" />
+          <NavItem to="/payroll" icon="₹" label="Payroll" />
         </nav>
 
         <div className="border-t border-white/10 p-4">
